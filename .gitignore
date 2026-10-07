@@ -1,0 +1,6 @@
+# macOS
+.DS_Store
+
+# Script output (may contain product keys / serials)
+*.txt
+LicenseAudit*
