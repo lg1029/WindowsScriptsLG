@@ -3,7 +3,7 @@
     Audits how a Windows device is licensed and whether a reimage will lose activation.
 
 .DESCRIPTION
-    Read-only. Collects hardware details, the firmware (OEM) product key, the installed
+    Read-only. Collects the firmware (OEM) product key, the installed
     product key decoded from the registry, the active license channel, and the edition,
     then prints a RESULT line describing reimage risk, with a plain-language reason and next step.
 
@@ -93,9 +93,7 @@ if ($found.Count -eq 0) {
     $leftovers = 'found ' + ($found -join ', ') + ' (run with -Cleanup to remove)'
 }
 
-# --- Hardware ---
-$cs   = Get-CimInstance Win32_ComputerSystem
-$bios = Get-CimInstance Win32_BIOS
+# --- Installed OS ---
 $os   = Get-CimInstance Win32_OperatingSystem
 
 # --- Firmware (OEM) key embedded by the manufacturer ---
@@ -223,29 +221,25 @@ $licenseType = switch -Regex ($channel) {
 }
 $activation = if ($status -eq 'Licensed') { 'Activated' } else { "Not activated ($status)" }
 $installedKey = if ($regKey) { $regKey + $(if ($isGeneric) { '  (generic placeholder, not a real key)' } else { '' }) } else { 'Not found' }
-$model = if ($cs.SystemFamily -and $cs.Model -notmatch [regex]::Escape($cs.SystemFamily)) { "$($cs.Model) ($($cs.SystemFamily))" } else { $cs.Model }
 
 # --- Output (most important first; some consoles cut off long output) ---
+$extra = @()
+if ($WatchReenroll) { $extra += "MDM device ID: $(if ($deviceId) { $deviceId } else { 'unknown' })" }
+if ($leftovers -ne 'none') { $extra += "Cleanup:       $leftovers" }
+
 $report = @"
 RESULT:        $result
 Why:           $why
 Action:        $todo
 Key to save:   $saveKey
 
---- Windows ---
-Edition:       $installedEdition ($($os.Version))
+--- License details ---
 Activation:    $activation
 License type:  $licenseType
 Firmware key:  $(if ($fwKey) { "$fwKey  ($fwKeyDesc)" } else { 'None' })
 Installed key: $installedKey
-
---- Device ---
-Model:         $($cs.Manufacturer) $model
-Serial:        $($bios.SerialNumber)
-BIOS:          $($bios.SMBIOSBIOSVersion)
-MDM device ID: $(if ($deviceId) { $deviceId } else { 'unknown' })
-Checked:       $(Get-Date -Format 'yyyy-MM-dd HH:mm zzz')$(if ($leftovers -ne 'none') { "`nCleanup:       $leftovers" })
 "@
+if ($extra.Count) { $report += "`n" + ($extra -join "`n") }
 
 $report | Set-Content -Path $OutFile -Encoding UTF8
 Write-Output $report

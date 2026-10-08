@@ -20,11 +20,10 @@ Devices that shipped without an OS, or were bought through resellers, often have
 
 ## What the script checks
 
-1. **Hardware:** manufacturer, model, serial, BIOS version
-2. **Firmware key:** the OEM key in the device firmware, and which edition it is for
-3. **Registry key:** the key Windows is currently using, decoded from `DigitalProductId`
-4. **Active license:** activation status, license channel (OEM / Retail / Volume), last 5 characters of the active key
-5. **Edition match:** firmware edition vs installed edition
+1. **Firmware key:** the OEM key in the device firmware, and which edition it is for
+2. **Registry key:** the key Windows is currently using, decoded from `DigitalProductId`
+3. **Active license:** activation status, license channel (OEM / Retail / Volume), last 5 characters of the active key
+4. **Edition match:** firmware edition vs installed edition
 
 Then it reports a **RESULT**:
 
@@ -44,20 +43,14 @@ Why:           The product key is stored in the device firmware.
 Action:        Reimage with the same Windows edition. It will activate on its own.
 Key to save:   XXXXX-XXXXX-XXXXX-XXXXX-XXXXX (also in firmware)
 
---- Windows ---
-Edition:       Microsoft Windows 11 Pro (10.0.26200)
+--- License details ---
 Activation:    Activated
 License type:  Manufacturer (OEM)
 Firmware key:  XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  ([4.0] Professional OEM:DM)
 Installed key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-
---- Device ---
-Model:         <manufacturer> <model>
-Serial:        <serial>
-BIOS:          <bios version>
-MDM device ID: 00000000-0000-0000-0000-000000000000
-Checked:       2026-01-01 12:00 -05:00
 ```
+
+Model, serial and BIOS aren't included because most MDMs already show them on the device record.
 
 ## Run locally
 
