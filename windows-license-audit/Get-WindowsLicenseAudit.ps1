@@ -7,8 +7,9 @@
     product key decoded from the registry, the active license channel, and the edition,
     then prints a VERDICT line describing reimage risk.
 
-    The only thing written to disk is a copy of the output (see -OutFile), plus an optional
-    re-enroll watcher task (see -WatchReenroll).
+    The only things written to disk are a copy of the output (see -OutFile) and, optionally,
+    a watcher task (see -WatchReenroll). The output always includes a "Leftovers" line that
+    reports any files or tasks left behind by an earlier deployment.
 
 .PARAMETER OutFile
     Where to save a copy of the output. Default: C:\ProgramData\LicenseAudit\LicenseAudit.txt
@@ -19,6 +20,18 @@
     If the device's MDM identity changes (the device was re-enrolled into a new record), it deletes
     the output file. Deployed as an MDM app with a file detection rule and continuous enforcement,
     this makes the MDM re-run the audit so the result shows on the new device record.
+
+.PARAMETER RefreshDays
+    With -WatchReenroll: the watcher also deletes the output file when it is older than this
+    many days, so the audit re-runs and the result stays current. 0 turns this off. Default: 7.
+
+    The watcher removes itself if the output file stays missing for 24 hours, which means the
+    MDM no longer deploys the audit. This cleans up devices even if the MDM has no uninstall step.
+
+.PARAMETER Cleanup
+    Remove leftovers from an earlier app-style deployment (the watcher task, its helper files,
+    and the default output file) before running. Use it when switching to a script-style
+    deployment. Don't use it while the app-style deployment is still assigned.
 
 .PARAMETER IdentityPattern
     Regex matched against certificate subjects in the LocalMachine\My store to find the MDM
@@ -40,6 +53,8 @@
 param(
     [string]$OutFile = "$env:ProgramData\LicenseAudit\LicenseAudit.txt",
     [switch]$WatchReenroll,
+    [int]$RefreshDays = 7,
+    [switch]$Cleanup,
     [string]$IdentityPattern = 'CN=Agent Identity ([0-9a-fA-F-]{36})',
     [switch]$FailOnRisk
 )
@@ -50,13 +65,33 @@ $ErrorActionPreference = 'SilentlyContinue'
 if ($env:PROCESSOR_ARCHITEW6432 -and -not [Environment]::Is64BitProcess) {
     $argsList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-OutFile', $OutFile)
     if ($WatchReenroll) { $argsList += '-WatchReenroll' }
-    $argsList += @('-IdentityPattern', $IdentityPattern)
+    if ($Cleanup) { $argsList += '-Cleanup' }
+    $argsList += @('-RefreshDays', $RefreshDays, '-IdentityPattern', $IdentityPattern)
     if ($FailOnRisk) { $argsList += '-FailOnRisk' }
     & "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" @argsList
     exit $LASTEXITCODE
 }
 
 New-Item -ItemType Directory -Path (Split-Path $OutFile) -Force | Out-Null
+
+# --- Leftovers from an earlier deployment ---
+$appDir   = "$env:ProgramData\LicenseAudit"
+$appOut   = Join-Path $appDir 'LicenseAudit.txt'
+$taskName = 'LicenseAudit-ReenrollWatch'
+$found = @()
+if (-not $WatchReenroll -and (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { $found += 'watcher task' }
+if (($appOut -ne $OutFile) -and (Test-Path $appOut)) { $found += "old output file ($appOut)" }
+if ($found.Count -eq 0) {
+    $leftovers = 'none'
+} elseif ($Cleanup) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    foreach ($f in @($appOut, (Join-Path $appDir 'Watch-Reenroll.ps1'), (Join-Path $appDir 'missing-since.txt'))) {
+        if ($f -ne $OutFile) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+    $leftovers = 'removed ' + ($found -join ', ')
+} else {
+    $leftovers = 'found ' + ($found -join ', ') + ' (run with -Cleanup to remove)'
+}
 
 # --- Hardware ---
 $cs   = Get-CimInstance Win32_ComputerSystem
@@ -161,6 +196,7 @@ Firmware key:     $(if ($fwKey) { $fwKey } else { 'NONE' })
 Firmware edition: $(if ($fwKeyDesc) { $fwKeyDesc } else { 'n/a' })
 Registry key:     $(if ($regKey) { $regKey + $(if ($isGeneric) { ' (generic setup key - not a real license key)' } else { '' }) } else { 'n/a' })
 MDM device ID:    $(if ($deviceId) { $deviceId } else { 'unknown' })
+Leftovers:        $leftovers
 Run at:           $(Get-Date -Format o)
 "@
 
@@ -168,26 +204,39 @@ $report | Set-Content -Path $OutFile -Encoding UTF8
 Write-Output $report
 
 if ($WatchReenroll -and $deviceId) {
-    # --- Re-enroll watcher ---
-    # Every 15 minutes, compare the device's current MDM device ID with the one saved in the
-    # output file. If they differ (the device was re-enrolled), delete the output file so the MDM
-    # runs this audit again and the result shows on the new device record.
+    # --- Watcher (runs every 15 minutes as SYSTEM) ---
+    # 1. Re-enrolled into a new MDM record? Delete the output file so the audit re-runs.
+    # 2. Output older than RefreshDays? Delete it so the result stays current.
+    # 3. Output missing for 24 hours? The MDM no longer deploys the audit, so remove the
+    #    watcher and its files.
     $watchDir  = Split-Path $OutFile
     $watchFile = Join-Path $watchDir 'Watch-Reenroll.ps1'
-    @"
-    `$out = '$OutFile'
-    if (-not (Test-Path `$out)) { exit 0 }
+    $missFile  = Join-Path $watchDir 'missing-since.txt'
+@"
+`$out  = '$OutFile'
+`$miss = '$missFile'
+if (Test-Path `$out) {
+    Remove-Item -LiteralPath `$miss -Force -ErrorAction SilentlyContinue
     `$saved = (Select-String -Path `$out -Pattern 'MDM device ID:\s+(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
     `$c = Get-ChildItem Cert:\LocalMachine\My | Where-Object { `$_.Subject -match '$IdentityPattern' } | Sort-Object NotBefore -Descending | Select-Object -First 1
-    if (`$c -and `$c.Subject -match '$IdentityPattern') { `$now = `$Matches[1] } else { exit 0 }
-    if (`$saved -ne `$now) { Remove-Item -LiteralPath `$out -Force -ErrorAction SilentlyContinue }
+    `$now = `$null
+    if (`$c -and `$c.Subject -match '$IdentityPattern') { `$now = `$Matches[1] }
+    `$stale = ($RefreshDays -gt 0) -and ((Get-Item `$out).LastWriteTime -lt (Get-Date).AddDays(-$RefreshDays))
+    if ((`$now -and `$saved -ne `$now) -or `$stale) { Remove-Item -LiteralPath `$out -Force -ErrorAction SilentlyContinue }
+} else {
+    if (-not (Test-Path `$miss)) { (Get-Date).ToString('o') | Set-Content -Path `$miss }
+    elseif (((Get-Date) - [datetime](Get-Content `$miss | Select-Object -First 1)).TotalHours -ge 24) {
+        Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath `$miss, '$watchFile' -Force -ErrorAction SilentlyContinue
+    }
+}
 "@ | Set-Content -Path $watchFile -Encoding UTF8
 
     $action    = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
                  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchFile`""
     $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(15) -RepetitionInterval (New-TimeSpan -Minutes 15)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName 'LicenseAudit-ReenrollWatch' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 }
 
 if ($FailOnRisk -and $atRisk) { exit 1 }

@@ -72,6 +72,8 @@ Optional parameters:
 | `-OutFile <path>` | Change where the output copy is saved |
 | `-FailOnRisk` | Exit `1` for anything other than `SAFE` / `DIGITAL LICENSE`, so at-risk devices show as failed in your tool |
 | `-WatchReenroll` | Add a small scheduled task that re-triggers the audit when the device is re-enrolled into a new MDM record (see Option B) |
+| `-RefreshDays <n>` | With `-WatchReenroll`: re-run the audit when the result is older than *n* days. Default `7`, `0` turns it off |
+| `-Cleanup` | Remove leftovers from an earlier app-style deployment before running. Use when switching to a script item |
 | `-IdentityPattern <regex>` | How to find the MDM's device ID in the machine certificate store. Default: `CN=Agent Identity (<GUID>)` |
 
 ## Deploy remotely with an MDM
@@ -107,9 +109,15 @@ The watcher only works if your MDM agent puts a device-identity certificate in `
 
 To re-run the audit by hand on a device, delete `C:\ProgramData\LicenseAudit\LicenseAudit.txt`.
 
+#### Cleanup when you stop deploying it
+
+Some MDMs don't run the uninstall command when you unassign an app. The watcher handles this itself: if the output file stays missing for 24 hours (nothing re-ran the audit), it removes its scheduled task and helper files. The output file from the last run remains until it's refreshed or deleted.
+
+Every run also reports a `Leftovers:` line listing anything an earlier deployment left behind.
+
 ### Option B: Script item
 
-1. Create a Windows PowerShell script item and paste in the script. Don't pass `-WatchReenroll`.
+1. Create a Windows PowerShell script item and paste in the script. Don't pass `-WatchReenroll`. If you're switching from Option A, pass `-Cleanup` once to remove its leftovers.
 2. Run it in **64-bit** PowerShell, as **SYSTEM**.
 3. Leave the remediation script empty. There is nothing to fix automatically.
 4. Optionally pass `-FailOnRisk` so risky devices are flagged.
