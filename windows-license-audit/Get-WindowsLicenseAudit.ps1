@@ -133,7 +133,7 @@ License channel:  $channel
 Active key (last 5): $($lic.PartialProductKey)
 Firmware key:     $(if ($fwKey) { $fwKey } else { 'NONE' })
 Firmware edition: $(if ($fwKeyDesc) { $fwKeyDesc } else { 'n/a' })
-Registry key:     $(if ($regKey) { $regKey + $(if ($isGeneric) { ' (generic - digital license)' } else { '' }) } else { 'n/a' })
+Registry key:     $(if ($regKey) { $regKey + $(if ($isGeneric) { ' (generic setup key - not a real license key)' } else { '' }) } else { 'n/a' })
 Run at:           $(Get-Date -Format o)
 "@
 
