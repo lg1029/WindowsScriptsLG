@@ -26,35 +26,37 @@ Devices that shipped without an OS, or were bought through resellers, often have
 4. **Active license:** activation status, license channel (OEM / Retail / Volume), last 5 characters of the active key
 5. **Edition match:** firmware edition vs installed edition
 
-Then it prints a **VERDICT**:
+Then it reports a **RESULT**:
 
-| Verdict | Meaning | Action |
+| Result | Meaning | What to do |
 |---|---|---|
-| `SAFE` | Firmware key present, edition matches | Reimage with the same edition |
-| `CAPTURE KEY` | Retail key, not in firmware | Save the registry key before reimaging, re-enter after |
-| `DIGITAL LICENSE` | Generic key shown; license held by Microsoft activation servers | Reinstall the same edition; no key to save |
-| `AT RISK` | Edition mismatch or volume (MAK/KMS) key | Fix edition, or plan proper licensing |
-| `CHECK` / `UNKNOWN` | Unusual state | Review manually |
-
-It doesn't change any device settings. It writes a copy of its output (default `C:\ProgramData\LicenseAudit\LicenseAudit.txt`), and with `-WatchReenroll` it also adds one scheduled task, `LicenseAudit-ReenrollWatch`.
+| `SAFE TO REIMAGE` | Key is in firmware and the edition matches | Reimage with the same edition |
+| `SAVE KEY FIRST` | Retail key that exists only in this install | Save the key shown, re-enter it after reimaging |
+| `DIGITAL LICENSE` | Microsoft's activation servers hold the license | Reinstall the same edition; nothing to save |
+| `AT RISK` | Edition mismatch or a volume (MAK/KMS) key | Fix the edition or plan proper licensing |
+| `CHECK MANUALLY` | Unusual state | Review by hand |
 
 ## Sample output
 
 ```
-VERDICT:          SAFE - firmware key present; reimage with the same edition will auto-activate.
-Manufacturer:     <manufacturer>
-Model:            <model> (<family>)
-Serial:           <serial>
-BIOS:             <bios version>
-Installed OS:     Microsoft Windows 11 Pro 10.0.26200
-License status:   Licensed
-License channel:  OEM_DM
-Active key (last 5): XXXXX
-Firmware key:     XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-Firmware edition: [4.0] Professional OEM:DM
-Registry key:     XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-MDM device ID:    00000000-0000-0000-0000-000000000000
-Run at:           2026-01-01T12:00:00.0000000-05:00
+RESULT:        SAFE TO REIMAGE
+Why:           The product key is stored in the device firmware.
+Action:        Reimage with the same Windows edition. It will activate on its own.
+Key to save:   XXXXX-XXXXX-XXXXX-XXXXX-XXXXX (also in firmware)
+
+--- Windows ---
+Edition:       Microsoft Windows 11 Pro (10.0.26200)
+Activation:    Activated
+License type:  Manufacturer (OEM)
+Firmware key:  XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  ([4.0] Professional OEM:DM)
+Installed key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+
+--- Device ---
+Model:         <manufacturer> <model>
+Serial:        <serial>
+BIOS:          <bios version>
+MDM device ID: 00000000-0000-0000-0000-000000000000
+Checked:       2026-01-01 12:00 -05:00
 ```
 
 ## Run locally
@@ -70,7 +72,7 @@ Optional parameters:
 | Parameter | Purpose |
 |---|---|
 | `-OutFile <path>` | Change where the output copy is saved |
-| `-FailOnRisk` | Exit `1` for anything other than `SAFE` / `DIGITAL LICENSE`, so at-risk devices show as failed in your tool |
+| `-FailOnRisk` | Exit `1` for anything other than `SAFE TO REIMAGE` / `DIGITAL LICENSE`, so at-risk devices show as failed in your tool |
 | `-WatchReenroll` | Add a small scheduled task that re-triggers the audit when the device is re-enrolled into a new MDM record (see Option B) |
 | `-RefreshDays <n>` | With `-WatchReenroll`: re-run the audit when the result is older than *n* days. Default `7`, `0` turns it off |
 | `-Cleanup` | Remove leftovers from an earlier app-style deployment before running. Use when switching to a script item |
@@ -135,7 +137,7 @@ slmgr /dli    # license channel and partial key
 ## Notes and limitations
 
 - **Can't write keys to firmware.** The OEM key is written at the factory and the area is write-protected. Store captured keys somewhere safe instead (MDM device notes, password manager), keyed by serial number.
-- **Re-activating after a reimage.** For `CAPTURE KEY` devices, a follow-up script can run `slmgr /ipk <key>` and `slmgr /ato`. Treat any script that contains keys as sensitive.
+- **Re-activating after a reimage.** For `SAVE KEY FIRST` devices, a follow-up script can run `slmgr /ipk <key>` and `slmgr /ato`. Treat any script that contains keys as sensitive.
 - **Volume/reseller keys.** If many devices come back `AT RISK` on a volume channel, the long-term fix is proper licensing (for example a MAK key from Microsoft volume licensing, deployable to all devices with one script).
 - **Key visibility.** Full product keys appear in the script output. Anyone with access to your management console's logs can see them.
 - **Digital licenses** show a generic key in the registry. That's expected and not a real key to save.

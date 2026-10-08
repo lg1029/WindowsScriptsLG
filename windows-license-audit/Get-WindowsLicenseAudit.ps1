@@ -5,7 +5,7 @@
 .DESCRIPTION
     Read-only. Collects hardware details, the firmware (OEM) product key, the installed
     product key decoded from the registry, the active license channel, and the edition,
-    then prints a VERDICT line describing reimage risk.
+    then prints a RESULT line describing reimage risk, with a plain-language reason and next step.
 
     The only things written to disk are a copy of the output (see -OutFile) and, optionally,
     a watcher task (see -WatchReenroll). The output always includes a "Leftovers" line that
@@ -163,41 +163,88 @@ function Get-MdmDeviceId {
 $deviceId = Get-MdmDeviceId
 
 # --- Verdict ---
-$atRisk = $true
-$verdict = switch -Regex ($channel) {
+# $result: short label   $why: plain-language reason   $todo: what to do   $saveKey: key worth saving
+$atRisk  = $true
+$saveKey = 'None'
+switch -Regex ($channel) {
     '^OEM' {
-        if ($fwKey) {
-            if ($editionMismatch) { "AT RISK - firmware key is $fwEdition but $installedEdition is installed. Reimage with $fwEdition or license the installed edition." }
-            else { $atRisk = $false; 'SAFE - firmware key present; reimage with the same edition will auto-activate.' }
-        } else { 'CHECK - OEM channel but no firmware key found.' }
+        if ($fwKey -and -not $editionMismatch) {
+            $result = 'SAFE TO REIMAGE'; $atRisk = $false
+            $why    = 'The product key is stored in the device firmware.'
+            $todo   = 'Reimage with the same Windows edition. It will activate on its own.'
+            $saveKey = "$fwKey (also in firmware)"
+        } elseif ($fwKey) {
+            $result = 'AT RISK'
+            $why    = "The firmware key is for Windows $fwEdition, but a different edition is installed."
+            $todo   = "Reimage with Windows $fwEdition, or license the installed edition."
+            $saveKey = "$fwKey (Windows $fwEdition)"
+        } else {
+            $result = 'CHECK MANUALLY'
+            $why    = 'Windows reports a manufacturer license, but no key was found in firmware.'
+            $todo   = 'Check this device by hand before reimaging.'
+        }
     }
     '^RETAIL' {
-        if ($isGeneric) { $atRisk = $false; 'DIGITAL LICENSE - reinstall the SAME edition on the same hardware; should reactivate online.' }
-        else            { 'CAPTURE KEY - retail key exists only in this install. Save the Registry key below before reimaging.' }
+        if ($isGeneric) {
+            $result = 'DIGITAL LICENSE'; $atRisk = $false
+            $why    = "Microsoft's activation servers hold the license for this hardware."
+            $todo   = 'Reinstall the same edition on the same hardware. It should activate online.'
+        } else {
+            $result = 'SAVE KEY FIRST'
+            $why    = 'A retail key was entered after purchase. It exists only in this Windows install.'
+            $todo   = 'Save the key below before reimaging, then re-enter it afterwards.'
+            $saveKey = $regKey
+        }
     }
-    '^VOLUME_MAK' { 'AT RISK - volume MAK key. May not reactivate after reimage; plan for proper licensing.' }
-    '^VOLUME_KMS' { 'AT RISK - KMS client; only activates against a KMS server.' }
-    default       { 'UNKNOWN - review manually.' }
+    '^VOLUME_MAK' {
+        $result = 'AT RISK'
+        $why    = 'Activated with a volume (MAK) key, often supplied by a reseller.'
+        $todo   = 'It may not reactivate after a reimage. Plan for a proper license.'
+    }
+    '^VOLUME_KMS' {
+        $result = 'AT RISK'
+        $why    = 'Uses a volume (KMS) setup key that only activates against a company KMS server.'
+        $todo   = 'It will not activate after a reimage without a proper license.'
+    }
+    default {
+        $result = 'CHECK MANUALLY'
+        $why    = "Unrecognized license type ($channel)."
+        $todo   = 'Check this device by hand before reimaging.'
+    }
 }
-if ($status -ne 'Licensed') { $verdict = "NOT ACTIVATED NOW ($status). " + $verdict; $atRisk = $true }
+if ($status -ne 'Licensed') { $atRisk = $true }
 
-# --- Output ---
+$licenseType = switch -Regex ($channel) {
+    '^OEM'        { 'Manufacturer (OEM)' }
+    '^RETAIL'     { if ($isGeneric) { 'Digital license' } else { 'Retail key' } }
+    '^VOLUME_MAK' { 'Volume (MAK)' }
+    '^VOLUME_KMS' { 'Volume (KMS)' }
+    default       { $channel }
+}
+$activation = if ($status -eq 'Licensed') { 'Activated' } else { "Not activated ($status)" }
+$installedKey = if ($regKey) { $regKey + $(if ($isGeneric) { '  (generic placeholder, not a real key)' } else { '' }) } else { 'Not found' }
+$model = if ($cs.SystemFamily -and $cs.Model -notmatch [regex]::Escape($cs.SystemFamily)) { "$($cs.Model) ($($cs.SystemFamily))" } else { $cs.Model }
+
+# --- Output (most important first; some consoles cut off long output) ---
 $report = @"
-VERDICT:          $verdict
-Manufacturer:     $($cs.Manufacturer)
-Model:            $($cs.Model) ($($cs.SystemFamily))
-Serial:           $($bios.SerialNumber)
-BIOS:             $($bios.SMBIOSBIOSVersion)
-Installed OS:     $installedEdition $($os.Version)
-License status:   $status
-License channel:  $channel
-Active key (last 5): $($lic.PartialProductKey)
-Firmware key:     $(if ($fwKey) { $fwKey } else { 'NONE' })
-Firmware edition: $(if ($fwKeyDesc) { $fwKeyDesc } else { 'n/a' })
-Registry key:     $(if ($regKey) { $regKey + $(if ($isGeneric) { ' (generic setup key - not a real license key)' } else { '' }) } else { 'n/a' })
-MDM device ID:    $(if ($deviceId) { $deviceId } else { 'unknown' })
-Leftovers:        $leftovers
-Run at:           $(Get-Date -Format o)
+RESULT:        $result
+Why:           $why
+Action:        $todo
+Key to save:   $saveKey
+
+--- Windows ---
+Edition:       $installedEdition ($($os.Version))
+Activation:    $activation
+License type:  $licenseType
+Firmware key:  $(if ($fwKey) { "$fwKey  ($fwKeyDesc)" } else { 'None' })
+Installed key: $installedKey
+
+--- Device ---
+Model:         $($cs.Manufacturer) $model
+Serial:        $($bios.SerialNumber)
+BIOS:          $($bios.SMBIOSBIOSVersion)
+MDM device ID: $(if ($deviceId) { $deviceId } else { 'unknown' })
+Checked:       $(Get-Date -Format 'yyyy-MM-dd HH:mm zzz')$(if ($leftovers -ne 'none') { "`nCleanup:       $leftovers" })
 "@
 
 $report | Set-Content -Path $OutFile -Encoding UTF8
