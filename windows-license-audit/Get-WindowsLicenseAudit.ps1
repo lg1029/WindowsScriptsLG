@@ -7,11 +7,23 @@
     product key decoded from the registry, the active license channel, and the edition,
     then prints a VERDICT line describing reimage risk.
 
-    The only thing written to disk is a copy of the output (see -OutFile).
+    The only thing written to disk is a copy of the output (see -OutFile), plus an optional
+    re-enroll watcher task (see -WatchReenroll).
 
 .PARAMETER OutFile
     Where to save a copy of the output. Default: C:\ProgramData\LicenseAudit\LicenseAudit.txt
     Useful as a detection file when deploying through an MDM "app" item.
+
+.PARAMETER WatchReenroll
+    Registers a SYSTEM scheduled task ("LicenseAudit-ReenrollWatch") that runs every 15 minutes.
+    If the device's MDM identity changes (the device was re-enrolled into a new record), it deletes
+    the output file. Deployed as an MDM app with a file detection rule and continuous enforcement,
+    this makes the MDM re-run the audit so the result shows on the new device record.
+
+.PARAMETER IdentityPattern
+    Regex matched against certificate subjects in the LocalMachine\My store to find the MDM
+    agent's device identity. The first capture group is used as the device ID.
+    Default matches certificates with a subject like "CN=Agent Identity <GUID>".
 
 .PARAMETER FailOnRisk
     Exit with code 1 when the verdict is anything other than SAFE or DIGITAL LICENSE,
@@ -27,6 +39,8 @@
 [CmdletBinding()]
 param(
     [string]$OutFile = "$env:ProgramData\LicenseAudit\LicenseAudit.txt",
+    [switch]$WatchReenroll,
+    [string]$IdentityPattern = 'CN=Agent Identity ([0-9a-fA-F-]{36})',
     [switch]$FailOnRisk
 )
 
@@ -35,6 +49,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 # Relaunch in 64-bit PowerShell if started from a 32-bit process on 64-bit Windows
 if ($env:PROCESSOR_ARCHITEW6432 -and -not [Environment]::Is64BitProcess) {
     $argsList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-OutFile', $OutFile)
+    if ($WatchReenroll) { $argsList += '-WatchReenroll' }
+    $argsList += @('-IdentityPattern', $IdentityPattern)
     if ($FailOnRisk) { $argsList += '-FailOnRisk' }
     & "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" @argsList
     exit $LASTEXITCODE
@@ -101,6 +117,16 @@ $installedEdition = $os.Caption
 $fwEdition = if ($fwKeyDesc -match 'Core|Home') { 'Home' } elseif ($fwKeyDesc -match 'Professional|Pro') { 'Pro' } else { $null }
 $editionMismatch = $fwEdition -and ($installedEdition -notmatch $fwEdition)
 
+# --- MDM device ID (from the agent's identity certificate, if present) ---
+function Get-MdmDeviceId {
+    $c = Get-ChildItem Cert:\LocalMachine\My |
+         Where-Object { $_.Subject -match $IdentityPattern } |
+         Sort-Object NotBefore -Descending | Select-Object -First 1
+    if ($c -and $c.Subject -match $IdentityPattern) { return $Matches[1] }
+    return $null
+}
+$deviceId = Get-MdmDeviceId
+
 # --- Verdict ---
 $atRisk = $true
 $verdict = switch -Regex ($channel) {
@@ -134,11 +160,35 @@ Active key (last 5): $($lic.PartialProductKey)
 Firmware key:     $(if ($fwKey) { $fwKey } else { 'NONE' })
 Firmware edition: $(if ($fwKeyDesc) { $fwKeyDesc } else { 'n/a' })
 Registry key:     $(if ($regKey) { $regKey + $(if ($isGeneric) { ' (generic setup key - not a real license key)' } else { '' }) } else { 'n/a' })
+MDM device ID:    $(if ($deviceId) { $deviceId } else { 'unknown' })
 Run at:           $(Get-Date -Format o)
 "@
 
 $report | Set-Content -Path $OutFile -Encoding UTF8
 Write-Output $report
+
+if ($WatchReenroll -and $deviceId) {
+    # --- Re-enroll watcher ---
+    # Every 15 minutes, compare the device's current MDM device ID with the one saved in the
+    # output file. If they differ (the device was re-enrolled), delete the output file so the MDM
+    # runs this audit again and the result shows on the new device record.
+    $watchDir  = Split-Path $OutFile
+    $watchFile = Join-Path $watchDir 'Watch-Reenroll.ps1'
+    @"
+    `$out = '$OutFile'
+    if (-not (Test-Path `$out)) { exit 0 }
+    `$saved = (Select-String -Path `$out -Pattern 'MDM device ID:\s+(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
+    `$c = Get-ChildItem Cert:\LocalMachine\My | Where-Object { `$_.Subject -match '$IdentityPattern' } | Sort-Object NotBefore -Descending | Select-Object -First 1
+    if (`$c -and `$c.Subject -match '$IdentityPattern') { `$now = `$Matches[1] } else { exit 0 }
+    if (`$saved -ne `$now) { Remove-Item -LiteralPath `$out -Force -ErrorAction SilentlyContinue }
+"@ | Set-Content -Path $watchFile -Encoding UTF8
+
+    $action    = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                 -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchFile`""
+    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(15) -RepetitionInterval (New-TimeSpan -Minutes 15)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName 'LicenseAudit-ReenrollWatch' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+}
 
 if ($FailOnRisk -and $atRisk) { exit 1 }
 exit 0

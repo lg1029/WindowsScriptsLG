@@ -36,7 +36,7 @@ Then it prints a **VERDICT**:
 | `AT RISK` | Edition mismatch or volume (MAK/KMS) key | Fix edition, or plan proper licensing |
 | `CHECK` / `UNKNOWN` | Unusual state | Review manually |
 
-It changes nothing on the device. The only file it writes is a copy of its output (default `C:\ProgramData\LicenseAudit\LicenseAudit.txt`).
+It doesn't change any device settings. It writes a copy of its output (default `C:\ProgramData\LicenseAudit\LicenseAudit.txt`), and with `-WatchReenroll` it also adds one scheduled task, `LicenseAudit-ReenrollWatch`.
 
 ## Sample output
 
@@ -53,6 +53,7 @@ Active key (last 5): XXXXX
 Firmware key:     XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
 Firmware edition: [4.0] Professional OEM:DM
 Registry key:     XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+MDM device ID:    00000000-0000-0000-0000-000000000000
 Run at:           2026-01-01T12:00:00.0000000-05:00
 ```
 
@@ -70,35 +71,51 @@ Optional parameters:
 |---|---|
 | `-OutFile <path>` | Change where the output copy is saved |
 | `-FailOnRisk` | Exit `1` for anything other than `SAFE` / `DIGITAL LICENSE`, so at-risk devices show as failed in your tool |
+| `-WatchReenroll` | Add a small scheduled task that re-triggers the audit when the device is re-enrolled into a new MDM record (see Option B) |
+| `-IdentityPattern <regex>` | How to find the MDM's device ID in the machine certificate store. Default: `CN=Agent Identity (<GUID>)` |
 
 ## Deploy remotely with an MDM
 
-### Option A: Script item (preferred if your MDM supports it)
+### Option A: App/package item (recommended)
 
-1. Create a Windows PowerShell script item and paste in the script.
+Works on new and already-enrolled devices, and keeps the result visible after a re-enrollment.
+
+1. Zip `Get-WindowsLicenseAudit.ps1` on its own.
+2. **Install command.** Use the **full path** to PowerShell. Some agents don't resolve `powershell.exe` on their own and fail with no exit code.
+   ```
+   C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Get-WindowsLicenseAudit.ps1 -WatchReenroll
+   ```
+3. **Uninstall command:**
+   ```
+   C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command "Remove-Item 'C:\ProgramData\LicenseAudit' -Recurse -Force; Unregister-ScheduledTask -TaskName 'LicenseAudit-ReenrollWatch' -Confirm:$false"
+   ```
+4. **Detection rule:** file exists at `C:\ProgramData\LicenseAudit\LicenseAudit.txt`
+5. **Install behavior:** install and continuously enforce.
+
+Many MDMs show the install command's standard output in the device's install log, which is where you'll read the verdict.
+
+#### How it stays current
+
+| Situation | What happens |
+|---|---|
+| New device enrolls | Output file missing, so the audit runs |
+| Device already enrolled | Output file missing, so the audit runs |
+| Wiped and re-enrolled | Wipe removed the file, so the audit runs |
+| Record deleted and re-enrolled without a wipe | Within 15 minutes the watcher sees a new MDM device ID and deletes the old output file; the audit runs at the next agent check (about 30 minutes total) |
+
+The watcher only works if your MDM agent puts a device-identity certificate in `Cert:\LocalMachine\My` whose subject contains the device ID. Check the output's `MDM device ID` line: if it says `unknown`, set `-IdentityPattern` to match your agent's certificate, or leave `-WatchReenroll` off.
+
+To re-run the audit by hand on a device, delete `C:\ProgramData\LicenseAudit\LicenseAudit.txt`.
+
+### Option B: Script item
+
+1. Create a Windows PowerShell script item and paste in the script. Don't pass `-WatchReenroll`.
 2. Run it in **64-bit** PowerShell, as **SYSTEM**.
 3. Leave the remediation script empty. There is nothing to fix automatically.
 4. Optionally pass `-FailOnRisk` so risky devices are flagged.
 5. Read the verdict from the script's standard output in your console.
 
-### Option B: App/package item that runs a script
-
-If your MDM can't run scripts directly but can deploy a zipped package with a custom install command:
-
-1. Zip `Get-WindowsLicenseAudit.ps1` on its own.
-2. **Install command.** Use the **full path** to PowerShell. Some agents don't resolve `powershell.exe` on their own and fail with no exit code.
-   ```
-   C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Get-WindowsLicenseAudit.ps1
-   ```
-3. **Uninstall command:**
-   ```
-   C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command "Remove-Item 'C:\ProgramData\LicenseAudit\LicenseAudit.txt' -Force"
-   ```
-4. **Detection rule:** file exists at `C:\ProgramData\LicenseAudit\LicenseAudit.txt`
-5. **Install behavior:** install once per device.
-6. To re-run later, bump the package version.
-
-Many MDMs show the install command's standard output in the device's install log, which is where you'll read the verdict.
+Some MDMs only run script items when a device enrolls, so already-enrolled devices may never pick one up. If that happens, use Option A.
 
 ## Check a device manually
 
